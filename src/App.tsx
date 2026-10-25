@@ -49,16 +49,32 @@ import {
   type RouteNode,
 } from "@campura/camap";
 import { openDocument, saveDocument } from "./files";
+import { addFeature, updateFeature, deleteEntity, uid, labels } from "./model";
 import {
-  addFeature,
-  updateFeature,
-  deleteEntity,
-  uid,
-  labels,
-  colors,
-} from "./model";
-import { createBasemap, type Basemap, type MapSettings } from "./amap";
+  createBasemap,
+  validateMapSettings,
+  mapCredentialsNeedReload,
+  type Basemap,
+  type MapSettings,
+} from "./amap";
+import {
+  locateCampus,
+  canOpenLocationSettings,
+  openLocationSettings,
+} from "./location";
+import {
+  useTheme,
+  canvasPalettes,
+  type Theme,
+  type ThemePreference,
+} from "./theme";
 import demo from "./demo.json";
+import {
+  loadMapCredentials,
+  saveMapCredentials,
+  clearMapCredentials,
+  emptyMapSettings,
+} from "./credentials";
 
 type Tool = FeatureKind | "select" | "pan" | "node" | "edge";
 const tools: { id: Tool; label: string; Icon: typeof Square }[] = [
@@ -97,6 +113,11 @@ function initial(): CamapDocument {
 }
 const flatten = (ps: Point[]) => ps.flat();
 export default function App() {
+  const { preference, setPreference, theme } = useTheme();
+  const palette = canvasPalettes[theme],
+    colors = palette.features;
+  const latestTheme = useRef(theme);
+  latestTheme.current = theme;
   const [doc, setDoc] = useState<CamapDocument>(initial),
     [tool, setTool] = useState<Tool>("select"),
     [selected, setSelected] = useState<{
@@ -121,15 +142,46 @@ export default function App() {
     [edgeStart, setEdgeStart] = useState<string | null>(null),
     [search, setSearch] = useState("");
   const [configOpen, setConfigOpen] = useState(false),
-    [mapSettings, setMapSettings] = useState<MapSettings>({
-      key: "",
-      proxy: "",
-      securityCode: "",
-      longitude: "",
-      latitude: "",
-    }),
+    [mapSettings, setMapSettings] = useState<MapSettings>(emptyMapSettings),
     [mapOn, setMapOn] = useState(false),
     [mapTick, setMapTick] = useState(0);
+  const [mapLoading, setMapLoading] = useState(false),
+    [mapError, setMapError] = useState(""),
+    [connectionAttempt, setConnectionAttempt] = useState(0);
+  const appliedMapSettings = useRef(mapSettings);
+  const [credentialsReady, setCredentialsReady] = useState(false),
+    [credentialBusy, setCredentialBusy] = useState(false),
+    [credentialNote, setCredentialNote] = useState("正在读取本机配置…");
+  useEffect(() => {
+    let disposed = false;
+    loadMapCredentials()
+      .then((settings) => {
+        if (disposed) return;
+        if (settings) setMapSettings(settings);
+        setCredentialNote(
+          settings
+            ? "已从本机系统凭据库读取配置，可直接连接。"
+            : "尚未保存配置，填写后可保存到本机。",
+        );
+      })
+      .catch(() => {
+        if (!disposed)
+          setCredentialNote(
+            "无法读取本机凭据库。请检查系统权限；已有配置不会自动覆盖。",
+          );
+      })
+      .finally(() => {
+        if (!disposed) setCredentialsReady(true);
+      });
+    return () => {
+      disposed = true;
+    };
+  }, []);
+  const [locating, setLocating] = useState(false),
+    [locationHint, setLocationHint] = useState(
+      "请将校园放到地图中心，再确认开始绘制。",
+    );
+  const locationAttempt = useRef<AbortController | null>(null);
   const [inspectOpen, setInspectOpen] = useState(false),
     [routeFrom, setRouteFrom] = useState(""),
     [routeTo, setRouteTo] = useState(""),
@@ -183,39 +235,74 @@ export default function App() {
     return () => observer.disconnect();
   }, []);
   useEffect(() => {
-    if (!mapOn || !activeFrame?.bindings.amap || !mapElement.current) return;
-    let disposed = false;
+    map.current?.setTheme(theme);
+  }, [theme]);
+  useEffect(() => {
+    if (!mapOn || !mapElement.current) {
+      setMapLoading(false);
+      setLocating(false);
+      return;
+    }
+    const controller = new AbortController();
+    let instance: Basemap | null = null;
+    setMapLoading(true);
+    setMapError("");
     createBasemap(
       mapElement.current,
-      mapSettings,
-      activeFrame.bindings.amap,
+      appliedMapSettings.current,
+      activeFrame?.bindings.amap,
       () => setMapTick((n) => n + 1),
+      latestTheme.current,
+      controller.signal,
     )
       .then((m) => {
-        if (disposed) m.destroy();
-        else {
-          map.current = m;
-          setMapTick((n) => n + 1);
+        if (controller.signal.aborted) {
+          m.destroy();
+          return;
+        }
+        instance = m;
+        m.setTheme(latestTheme.current);
+        map.current = m;
+        setMapTick((n) => n + 1);
+        setMapLoading(false);
+        if (activeFrame?.bindings.amap) {
+          setMessage(
+            "已回到保存的校园位置。使用「漫游」拖动地图，再选择工具绘制。",
+          );
+        } else {
+          setTool("pan");
+          void findCampus(m);
         }
       })
-      .catch((e) => {
-        setMessage(String(e.message));
+      .catch((error) => {
+        if (controller.signal.aborted) return;
+        const message =
+          error instanceof Error
+            ? error.message
+            : "底图连接失败，请检查配置后重试。";
+        setMapError(message);
+        setMessage(message);
         setMapOn(false);
+        setMapLoading(false);
       });
     return () => {
-      disposed = true;
-      map.current?.destroy();
-      map.current = null;
+      controller.abort();
+      locationAttempt.current?.abort();
+      instance?.destroy();
+      if (map.current === instance) map.current = null;
     };
   }, [
     mapOn,
+    connectionAttempt,
     activeFrame?.id,
     activeFrame?.bindings.amap?.longitude,
     activeFrame?.bindings.amap?.latitude,
     activeFrame?.bindings.amap?.rotation,
   ]);
   function commit(next: CamapDocument) {
-    setPast((p) => [...p.slice(-59), latest.current]);
+    // Capture before React schedules the updater; latest.current changes below.
+    const previous = latest.current;
+    setPast((p) => [...p.slice(-59), previous]);
     setFuture([]);
     latest.current = next;
     setDoc(next);
@@ -242,6 +329,7 @@ export default function App() {
     setLevelId("");
     setFrameId(next.frames[0]?.id || "");
     setMapOn(false);
+    setMapError("");
     setView({ x: 0, y: 0, scale: 3 });
   }
   async function run(action: () => Promise<void>) {
@@ -287,15 +375,16 @@ export default function App() {
     window.addEventListener("keydown", key);
     return () => window.removeEventListener("keydown", key);
   });
+  const choosingCampus = mapOn && !activeFrame?.bindings.amap;
   const project = (p: Point): Point =>
-    mapOn && map.current
+    mapOn && map.current && !choosingCampus
       ? map.current.project(p)
       : [
           p[0] * view.scale + size.width / 2 + view.x,
           -p[1] * view.scale + size.height / 2 + view.y,
         ];
   const unproject = (p: Point): Point =>
-    mapOn && map.current
+    mapOn && map.current && !choosingCampus
       ? map.current.unproject(p)
       : [
           (p[0] - size.width / 2 - view.x) / view.scale,
@@ -357,7 +446,10 @@ export default function App() {
   }
   function nodeClick(n: RouteNode) {
     if (tool === "edge") {
-      if (!edgeStart || !doc.nodes.some((q) => q.id === edgeStart && q.frameId === n.frameId)) {
+      if (
+        !edgeStart ||
+        !doc.nodes.some((q) => q.id === edgeStart && q.frameId === n.frameId)
+      ) {
         setEdgeStart(n.id);
         setMessage("选择道路的终点路点。");
       } else if (edgeStart !== n.id) {
@@ -413,28 +505,156 @@ export default function App() {
       scale: Math.max(0.2, Math.min(30, v.scale * (delta > 0 ? 1.25 : 0.8))),
     }));
   }
-  function bindMap() {
-    const lng = Number(mapSettings.longitude),
-      lat = Number(mapSettings.latitude);
-    if (
-      !mapSettings.longitude.trim() ||
-      !mapSettings.latitude.trim() ||
-      !Number.isFinite(lng) ||
-      !Number.isFinite(lat) ||
-      Math.abs(lng) > 180 ||
-      Math.abs(lat) > 80
-    ) {
-      setMessage("请输入真实区域原点的有效经纬度。");
-      return;
+  function reloadForCredentials() {
+    try {
+      localStorage.setItem(recoveryKey, JSON.stringify(latest.current));
+      window.location.reload();
+    } catch {
+      setMapError(
+        "本机配置已更新，但无法保存工程恢复副本。请先导出 .camap，再退出并重开 App 以应用配置。",
+      );
     }
-    const next = structuredClone(doc),
-      f = ensureFrame(next);
-    f.bindings.amap = { longitude: lng, latitude: lat, rotation: 0 };
-    f.revision++;
-    commit(next);
-    setConfigOpen(false);
-    setMapOn(true);
-    setMessage("正在连接高德地图…");
+  }
+  async function persistCredentials() {
+    validateMapSettings(mapSettings);
+    await saveMapCredentials(mapSettings);
+    setCredentialNote("已保存到本机系统凭据库，重启后会自动回填。");
+    if (mapCredentialsNeedReload(mapSettings)) {
+      reloadForCredentials();
+      return false;
+    }
+    return true;
+  }
+  async function saveCredentialsOnly() {
+    setCredentialBusy(true);
+    setMapError("");
+    try {
+      await persistCredentials();
+    } catch (error) {
+      setMapError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setCredentialBusy(false);
+    }
+  }
+  async function clearCredentials() {
+    setCredentialBusy(true);
+    setMapError("");
+    try {
+      await clearMapCredentials();
+      const empty = emptyMapSettings();
+      setMapSettings(empty);
+      appliedMapSettings.current = empty;
+      setMapOn(false);
+      setCredentialNote("已清除本机保存的配置。");
+      if (mapCredentialsNeedReload(empty)) reloadForCredentials();
+    } catch (error) {
+      setMapError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setCredentialBusy(false);
+    }
+  }
+  async function bindMap() {
+    setCredentialBusy(true);
+    try {
+      if (!(await persistCredentials())) return;
+      if (!activeFrame) {
+        const next = structuredClone(doc);
+        ensureFrame(next);
+        commit(next);
+      }
+      appliedMapSettings.current = { ...mapSettings };
+      setMapError("");
+      setConfigOpen(false);
+      setMapLoading(true);
+      setMapOn(true);
+      setConnectionAttempt((n) => n + 1);
+      setMessage("正在连接高德地图…");
+    } catch (error) {
+      setMapError(error instanceof Error ? error.message : "请检查底图配置。");
+    } finally {
+      setCredentialBusy(false);
+    }
+  }
+  async function findCampus(target: Basemap) {
+    locationAttempt.current?.abort();
+    const controller = new AbortController();
+    locationAttempt.current = controller;
+    setLocating(true);
+    setLocationHint("正在定位当前位置…首次使用时，请在系统提示中允许定位。");
+    try {
+      const location = await locateCampus(controller.signal);
+      if (controller.signal.aborted || map.current !== target) return;
+      // Desktop fixes can be based on Wi-Fi and may be kilometres off.
+      // Keep a very coarse fix from masquerading as a campus-scale location.
+      if (location.accuracy && location.accuracy > 2000) {
+        setLocationHint(
+          "系统只给出约 " +
+            Math.ceil(location.accuracy / 1000) +
+            " 公里的粗略位置，未移动地图。请手动找到校园后确认。",
+        );
+        return;
+      }
+      target.focus(
+        location.position,
+        location.accuracy && location.accuracy > 500
+          ? 14
+          : location.accuracy && location.accuracy > 100
+            ? 16
+            : 18,
+      );
+      setMapTick((n) => n + 1);
+      setLocationHint(
+        location.approximate
+          ? "已找到系统估算位置" +
+            (location.accuracy
+              ? "（约 " + Math.ceil(location.accuracy) + " 米误差）"
+              : "") +
+            "。请核对校园；可能需要拖动地图。"
+          : "已定位到当前位置" +
+              (location.accuracy
+                ? "（约 " + Math.ceil(location.accuracy) + " 米误差）"
+                : "") +
+              "。确认校园位置后开始绘制。",
+      );
+    } catch (error) {
+      if (controller.signal.aborted || map.current !== target) return;
+      setLocationHint(
+        (error instanceof Error
+          ? error.message
+          : "定位失败，请在地图上选择校园。") +
+          " 当前底图视角不是已确认的当前位置。",
+      );
+    } finally {
+      if (locationAttempt.current === controller) setLocating(false);
+    }
+  }
+  function chooseCampusManually() {
+    locationAttempt.current?.abort();
+    setLocating(false);
+    setLocationHint("请拖动、放大地图找到校园，再确认开始绘制。");
+  }
+  function useCampusCenter() {
+    if (!map.current || mapLoading || locating || !choosingCampus) return;
+    try {
+      if (map.current.getZoom() < 16) {
+        setLocationHint("请先放大地图，直到能看清校园里的建筑，再确认位置。");
+        return;
+      }
+      const binding = map.current.getCenter();
+      // React renders the newly bound features before the map effect can rebuild.
+      // Make the existing adapter projectable first to avoid a render-time crash.
+      map.current.setBinding(binding);
+      const next = structuredClone(doc),
+        frame = ensureFrame(next);
+      frame.bindings.amap = binding;
+      frame.revision++;
+      commit(next);
+      setMapLoading(true);
+      setTool("select");
+      setMessage("校园位置已保存，可以开始画地标了。");
+    } catch {
+      setLocationHint("暂时无法读取地图位置，请重新连接底图。");
+    }
   }
   function connectDoor() {
     if (!selectedFeature || selectedFeature.geometry.type !== "point") return;
@@ -484,6 +704,18 @@ export default function App() {
           <small>自动保留本地恢复副本</small>
         </div>
         <div className="header-actions">
+          <label className="theme-control">
+            <span>外观</span>
+            <select
+              aria-label="外观主题"
+              value={preference}
+              onChange={(e) => setPreference(e.target.value as ThemePreference)}
+            >
+              <option value="system">跟随系统</option>
+              <option value="light">浅色</option>
+              <option value="dark">深色</option>
+            </select>
+          </label>
           <button
             onClick={() =>
               void run(async () => {
@@ -715,12 +947,110 @@ export default function App() {
               </button>
             </div>
           </div>
-          <div className={"canvas-wrap tool-" + tool} ref={wrapper}>
+          <div
+            className={
+              "canvas-wrap tool-" +
+              tool +
+              (choosingCampus ? " campus-pick" : "")
+            }
+            ref={wrapper}
+            onPointerDownCapture={(e) => {
+              if (
+                choosingCampus &&
+                locating &&
+                !(e.target as HTMLElement).closest(".campus-picker")
+              )
+                chooseCampusManually();
+            }}
+            onWheelCapture={() => {
+              if (choosingCampus && locating) chooseCampusManually();
+            }}
+          >
             <div
               className="amap-layer"
               ref={mapElement}
               style={{ display: mapOn ? "block" : "none" }}
             />
+            {mapError && !configOpen && (
+              <div className="map-error" role="alert">
+                <span>{mapError}</span>
+                <button onClick={() => setConfigOpen(true)}>设置底图</button>
+                <button onClick={() => setMapError("")}>关闭提示</button>
+              </div>
+            )}
+            {mapLoading && (
+              <div className="map-loading" role="status">
+                <span>正在连接高德底图…</span>
+                <button
+                  onClick={() => {
+                    setMapOn(false);
+                    setMessage("已取消连接，继续使用本地网格。");
+                  }}
+                >
+                  取消连接
+                </button>
+              </div>
+            )}
+            {choosingCampus && !mapLoading && (
+              <>
+                <div className="campus-crosshair" aria-hidden="true">
+                  +
+                </div>
+                <section className="campus-picker" aria-label="确认校园位置">
+                  <strong>这是你要绘制的校园吗？</strong>
+                  <p role="status">{locationHint}</p>
+                  <small>
+                    将校园放到十字中心并放大后确认。已有本地绘图会保留相对位置，请在绑定后核对。
+                  </small>
+                  <div>
+                    {locating ? (
+                      <button
+                        onClick={() => {
+                          locationAttempt.current?.abort();
+                          setLocating(false);
+                          setLocationHint(
+                            "请拖动、放大地图找到校园，再确认开始绘制。",
+                          );
+                        }}
+                      >
+                        手动找校园
+                      </button>
+                    ) : (
+                      <button
+                        onClick={() =>
+                          map.current && void findCampus(map.current)
+                        }
+                      >
+                        重新定位
+                      </button>
+                    )}
+                    {canOpenLocationSettings() && (
+                      <button
+                        onClick={() => {
+                          void openLocationSettings().catch(() =>
+                            setLocationHint(
+                              "无法打开设置，请手动打开系统「隐私与安全性」中的定位服务。",
+                            ),
+                          );
+                        }}
+                      >
+                        系统定位设置
+                      </button>
+                    )}
+                    <button
+                      className="primary"
+                      disabled={locating}
+                      onClick={useCampusCenter}
+                    >
+                      从这里开始绘制
+                    </button>
+                    <button onClick={() => setMapOn(false)}>
+                      返回本地网格
+                    </button>
+                  </div>
+                </section>
+              </>
+            )}
             {!mapOn && (
               <div
                 className="paper-grid"
@@ -735,20 +1065,27 @@ export default function App() {
                 {mapOn ? "高德 · 二维地图" : "本地平面 · 米制坐标"}
               </span>
               <span>
-                {mapOn ? "绘制内容与底图同步" : "未绑定真实位置 · 可编辑并导出"}
+                {choosingCampus
+                  ? "请先确认校园位置"
+                  : mapOn
+                    ? "绘制内容与底图同步"
+                    : "本地画布 · 可连接高德校园底图"}
               </span>
             </div>
             <div
               style={{
                 position: "absolute",
                 inset: 0,
-                pointerEvents: mapOn && tool === "pan" ? "none" : "auto",
+                pointerEvents:
+                  choosingCampus || (mapOn && tool === "pan") ? "none" : "auto",
+                visibility: choosingCampus ? "hidden" : "visible",
               }}
             >
               <Stage
                 width={size.width}
                 height={size.height}
                 ref={stage}
+                listening={!mapLoading && !choosingCampus}
                 draggable={!mapOn && tool === "pan"}
                 onDragEnd={(e) => {
                   if (e.target === stage.current) {
@@ -800,12 +1137,12 @@ export default function App() {
                             )}
                             stroke={
                               route?.edges.includes(e.id)
-                                ? "#2c8c70"
+                                ? palette.route
                                 : e.closed
-                                  ? "#d5a49b"
+                                  ? palette.closed
                                   : selected?.id === e.id
-                                    ? "#e6a94f"
-                                    : "#8caba1"
+                                    ? palette.highlighted
+                                    : palette.road
                             }
                             strokeWidth={route?.edges.includes(e.id) ? 7 : 4}
                             dash={e.closed ? [6, 6] : undefined}
@@ -823,6 +1160,7 @@ export default function App() {
                     <MapFeature
                       key={f.id}
                       feature={f}
+                      theme={theme}
                       project={project}
                       unproject={unproject}
                       active={selected?.id === f.id}
@@ -870,8 +1208,12 @@ export default function App() {
                                   ? 7
                                   : 5
                               }
-                              fill={edgeStart === n.id ? "#cf8c32" : "#fff"}
-                              stroke="#357560"
+                              fill={
+                                edgeStart === n.id
+                                  ? palette.highlighted
+                                  : palette.handle
+                              }
+                              stroke={palette.selected}
                               strokeWidth={2}
                             />
                           </Group>
@@ -890,8 +1232,8 @@ export default function App() {
                           ].map((p) => project(p as Point)),
                         )}
                         closed
-                        fill="#20685120"
-                        stroke="#266c55"
+                        fill={palette.preview}
+                        stroke={palette.selected}
                         strokeWidth={1.5}
                         dash={[5, 4]}
                         listening={false}
@@ -1479,49 +1821,80 @@ export default function App() {
             aria-labelledby="map-settings-title"
           >
             <div className="section-kicker">底图设置</div>
-            <h2 id="map-settings-title">让画布对齐真实校园</h2>
+            <h2 id="map-settings-title">连接校园地图</h2>
             <p>
-              使用高德二维地图。原点为当前区域 (0, 0) 对应的高德坐标。Key
-              和安全配置仅保留在本次运行，不写入地图文件。
+              填入高德 Web JS Key
+              和配套安全密钥即可。新地图会尝试定位到当前位置，你确认校园后就能开始画；已有地图直接回到保存的校园。
+              无需填写经纬度。配置保存在这台电脑的系统凭据库，不写入地图文件；可随时修改或清除。
             </p>
-            {(
-              [
-                ["key", "高德 Web JS Key"],
-                ["proxy", "安全代理地址（正式使用）"],
-                ["securityCode", "开发用安全密钥（无代理时）"],
-                ["longitude", "区域原点经度"],
-                ["latitude", "区域原点纬度"],
-              ] as const
-            ).map(([k, label]) => (
-              <label key={k}>
-                {label}
-                <input
-                  type={k === "securityCode" ? "password" : "text"}
-                  value={mapSettings[k]}
-                  onChange={(e) =>
-                    setMapSettings((s) => ({ ...s, [k]: e.target.value }))
-                  }
-                />
-              </label>
-            ))}
+            <fieldset
+              className="credential-fields"
+              disabled={!credentialsReady || credentialBusy}
+            >
+              {(
+                [
+                  ["key", "高德 Web 端（JS API）Key"],
+                  ["securityCode", "配套安全密钥（本机试用）"],
+                  ["proxy", "安全代理地址（可选，填写后优先使用代理）"],
+                ] as const
+              ).map(([k, label]) => (
+                <label key={k}>
+                  {label}
+                  <input
+                    type={
+                      k === "securityCode" || k === "key" ? "password" : "text"
+                    }
+                    autoComplete="off"
+                    spellCheck={false}
+                    value={mapSettings[k]}
+                    onChange={(e) =>
+                      setMapSettings((s) => ({ ...s, [k]: e.target.value }))
+                    }
+                  />
+                </label>
+              ))}
+            </fieldset>
+            <p role="status">{credentialNote}</p>
+            <div className="credential-actions">
+              <button
+                disabled={!credentialsReady || credentialBusy}
+                onClick={() => void saveCredentialsOnly()}
+              >
+                保存到本机
+              </button>
+              <button
+                disabled={!credentialsReady || credentialBusy}
+                onClick={() => void clearCredentials()}
+              >
+                清除本机配置
+              </button>
+            </div>
+            {mapError && (
+              <p className="settings-error" role="alert">
+                {mapError}
+              </p>
+            )}
             <div className="dialog-actions">
               <button
                 onClick={() => {
                   setMapOn(false);
+                  setMapError("");
                   setConfigOpen(false);
                 }}
               >
                 使用本地网格
               </button>
               <button onClick={() => setConfigOpen(false)}>取消</button>
-              <button className="primary" onClick={bindMap}>
-                连接并绑定
+              <button
+                className="primary"
+                disabled={!credentialsReady || credentialBusy}
+                onClick={() => void bindMap()}
+              >
+                {credentialBusy ? "处理中…" : "保存并连接"}
               </button>
             </div>
             <small>
-              切换 Key
-              或安全配置后请重新启动应用。真实坐标需现场核验；此处不进行 GCJ-02
-              与 WGS84 的自动转换。
+              修改已加载的凭据后，会先保留当前工程并自动重载界面，再次点击连接即可。清除配置不删除地图。电脑定位可能有偏差，可拖动地图选择校园。
             </small>
           </section>
         </div>
@@ -1532,6 +1905,7 @@ export default function App() {
 
 function MapFeature({
   feature: f,
+  theme,
   project,
   unproject,
   active,
@@ -1540,6 +1914,7 @@ function MapFeature({
   change,
 }: {
   feature: Feature;
+  theme: Theme;
   project: (p: Point) => Point;
   unproject: (p: Point) => Point;
   active: boolean;
@@ -1547,6 +1922,8 @@ function MapFeature({
   select: () => void;
   change: (p: Point | Point[]) => void;
 }) {
+  const palette = canvasPalettes[theme],
+    colors = palette.features;
   const ref = useRef<Konva.Line>(null),
     transformer = useRef<Konva.Transformer>(null);
   useEffect(() => {
@@ -1586,7 +1963,7 @@ function MapFeature({
             <Circle
               radius={active ? 13 : 11}
               fill={colors[f.kind]}
-              stroke={active ? "#fff" : "#ffffffcc"}
+              stroke={active ? palette.pointSelected : palette.pointOutline}
               strokeWidth={active ? 3 : 2}
             />
             <Text
@@ -1596,7 +1973,7 @@ function MapFeature({
               width={14}
               align="center"
               fontSize={18}
-              fill="#fff"
+              fill={palette.glyph}
             />
           </>
         )}
@@ -1605,7 +1982,10 @@ function MapFeature({
           x={f.kind === "text" ? 0 : 17}
           y={-7}
           fontSize={12}
-          fill="#294638"
+          fill={palette.text}
+          shadowColor={palette.halo}
+          shadowBlur={3}
+          shadowOpacity={1}
           padding={2}
         />
       </Group>
@@ -1622,7 +2002,13 @@ function MapFeature({
         points={flatten(ps)}
         closed={closed}
         fill={closed ? colors[f.kind] + "aa" : undefined}
-        stroke={active ? "#23634d" : f.kind === "area" ? "#b8cdae" : "#8aa196"}
+        stroke={
+          active
+            ? palette.selected
+            : f.kind === "area"
+              ? palette.areaOutline
+              : palette.outline
+        }
         strokeWidth={active ? 2 : 1.5}
         draggable={editable}
         onClick={(e) => {
@@ -1657,7 +2043,10 @@ function MapFeature({
         align="center"
         fontSize={13}
         fontStyle={f.kind === "building" ? "bold" : "normal"}
-        fill="#345246"
+        fill={palette.text}
+        shadowColor={palette.halo}
+        shadowBlur={3}
+        shadowOpacity={1}
         text={f.name}
         listening={false}
       />
@@ -1672,8 +2061,9 @@ function MapFeature({
               Math.abs(b.width) < 8 || Math.abs(b.height) < 8 ? old : b
             }
             anchorSize={7}
-            borderStroke="#23634d"
-            anchorStroke="#23634d"
+            borderStroke={palette.selected}
+            anchorStroke={palette.selected}
+            anchorFill={palette.handle}
           />
           {ps.map(([x, y], i) => (
             <Circle
@@ -1681,8 +2071,8 @@ function MapFeature({
               x={x}
               y={y}
               radius={4}
-              stroke="#23634d"
-              fill="#fff"
+              stroke={palette.selected}
+              fill={palette.handle}
               draggable
               onDragEnd={(e) => {
                 const next = [...f.geometry.coordinates] as Point[];

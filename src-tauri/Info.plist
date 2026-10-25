@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>NSLocationWhenInUseUsageDescription</key>
+  <string>万卷图使用当前位置帮助你找到校园；也可以手动选择校园，不需要允许定位。</string>
+  <key>NSLocationUsageDescription</key>
+  <string>万卷图使用当前位置帮助你找到所在校园，确认后即可绘制地标。你也可以不允许定位，手动在地图上选择校园。</string>
+</dict>
+</plist>

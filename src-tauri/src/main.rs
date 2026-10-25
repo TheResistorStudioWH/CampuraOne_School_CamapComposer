@@ -1,4 +1,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+mod location;
+mod map_credentials;
+use map_credentials::{clear_map_credentials, load_map_credentials, save_map_credentials};
 const LIMIT: usize = 20 * 1024 * 1024;
 
 #[tauri::command]
@@ -69,7 +72,17 @@ async fn save_camap(name: String, bytes: Vec<u8>) -> Result<bool, String> {
 
 fn main() {
     tauri::Builder::default()
-        .invoke_handler(tauri::generate_handler![open_camap, save_camap])
+        .manage(location::LocationState::default())
+        .invoke_handler(tauri::generate_handler![
+            open_camap,
+            save_camap,
+            load_map_credentials,
+            save_map_credentials,
+            clear_map_credentials,
+            location::locate_device,
+            location::cancel_device_location,
+            location::open_location_settings
+        ])
         .run(tauri::generate_context!())
         .expect("无法启动万卷图");
 }

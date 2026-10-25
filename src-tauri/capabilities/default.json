@@ -1,1 +1,6 @@
-{"identifier":"main-capability","description":"Local editor window only","windows":["main"],"permissions":["core:default"]}
+{
+  "identifier": "main-capability",
+  "description": "Local editor window only",
+  "windows": ["main"],
+  "permissions": ["core:default", "core:window:allow-set-theme"]
+}
