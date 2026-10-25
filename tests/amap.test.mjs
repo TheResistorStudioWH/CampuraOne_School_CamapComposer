@@ -209,6 +209,14 @@ test("basemap retries failed loading, preserves its view on theme changes and cl
   preview.setBinding(undefined);
   assert.throws(() => preview.project([0, 0]), /确认校园/);
   preview.destroy();
+  // AMap may emit complete before the adapter can attach a listener.
+  const earlyComplete = await createBasemap(host, settings, binding, () => {});
+  assert.deepEqual(earlyComplete.getCenter(), {
+    longitude: 114.3,
+    latitude: 30.5,
+    rotation: 0,
+  });
+  earlyComplete.destroy();
 });
 
 test("campus location handles precise/coarse results, permission errors and cancellation", async (t) => {

@@ -218,6 +218,7 @@ export async function createBasemap(
     await new Promise<void>((resolve, reject) => {
       const cleanup = () => {
         clearTimeout(timer);
+        clearTimeout(readyFallback);
         map.off("complete", ready);
         map.off("error", failed);
         signal?.removeEventListener("abort", aborted);
@@ -251,6 +252,17 @@ export async function createBasemap(
         cleanup();
         reject(Error("高德底图加载超时。" + connectionHelp));
       }, 25000);
+      // AMap can finish its first frame inside the constructor, before on("complete")
+      // can be registered. A valid viewport is enough to start editing in that case.
+      const readyFallback = setTimeout(() => {
+        if (signal?.aborted) return aborted();
+        try {
+          checkedPosition(map.getCenter());
+          if (Number.isFinite(map.getZoom()) && map.getZoom() > 0) ready();
+        } catch {
+          // Keep waiting for the normal complete/error event.
+        }
+      }, 1500);
       map.on("complete", ready);
       map.on("error", failed);
       signal?.addEventListener("abort", aborted, { once: true });
