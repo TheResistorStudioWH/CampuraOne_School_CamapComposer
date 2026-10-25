@@ -1,0 +1,141 @@
+{
+  "formatVersion": "0.1.0",
+  "id": "0955d1bf-e97f-4d26-b6a0-76f253ab8d94",
+  "title": "万卷图 · 本地演示校区",
+  "masterId": null,
+  "baseRevision": null,
+  "frames": [
+    {
+      "id": "8570d364-07c4-4ccf-9652-5e326c2c6c9a",
+      "revision": 1,
+      "name": "演示区域（尚未绑定真实位置）",
+      "unit": "m",
+      "bindings": {}
+    }
+  ],
+  "features": [
+    {
+      "id": "3483567d-61f3-4478-8ff0-d036b67e9e93",
+      "revision": 1,
+      "frameId": "8570d364-07c4-4ccf-9652-5e326c2c6c9a",
+      "kind": "building",
+      "name": "图书馆（演示）",
+      "geometry": {
+        "type": "polygon",
+        "coordinates": [
+          [-55, 15],
+          [45, 15],
+          [45, 80],
+          [-55, 80]
+        ]
+      },
+      "levels": [
+        {
+          "id": "e28996cd-fbfc-4319-b918-faa7cc8814bd",
+          "label": "1F",
+          "ordinal": 1
+        },
+        {
+          "id": "3dc90f3b-079e-467c-aa1b-79c1eebed2b0",
+          "label": "2F",
+          "ordinal": 2
+        }
+      ]
+    },
+    {
+      "id": "046e65a3-3a60-4812-a2c1-90d732431232",
+      "revision": 1,
+      "frameId": "8570d364-07c4-4ccf-9652-5e326c2c6c9a",
+      "kind": "merchant",
+      "name": "书香咖啡（演示）",
+      "geometry": {
+        "type": "polygon",
+        "coordinates": [
+          [-45, 20],
+          [-10, 20],
+          [-10, 45],
+          [-45, 45]
+        ]
+      },
+      "buildingId": "3483567d-61f3-4478-8ff0-d036b67e9e93",
+      "levelId": "e28996cd-fbfc-4319-b918-faa7cc8814bd"
+    },
+    {
+      "id": "3e6b2fed-a03a-409b-8c5f-2449874da614",
+      "revision": 1,
+      "frameId": "8570d364-07c4-4ccf-9652-5e326c2c6c9a",
+      "kind": "door",
+      "name": "南门（演示）",
+      "geometry": {
+        "type": "point",
+        "coordinates": [-5, 15]
+      },
+      "buildingId": "3483567d-61f3-4478-8ff0-d036b67e9e93",
+      "levelId": "e28996cd-fbfc-4319-b918-faa7cc8814bd",
+      "exterior": true,
+      "accessible": true,
+      "width": 2
+    },
+    {
+      "id": "c8b480f0-3b69-4379-8c1f-8a006b4326ae",
+      "revision": 1,
+      "frameId": "8570d364-07c4-4ccf-9652-5e326c2c6c9a",
+      "kind": "stairs",
+      "name": "东侧楼梯（演示）",
+      "geometry": {
+        "type": "point",
+        "coordinates": [32, 40]
+      },
+      "buildingId": "3483567d-61f3-4478-8ff0-d036b67e9e93",
+      "levelId": "e28996cd-fbfc-4319-b918-faa7cc8814bd",
+      "servedLevelIds": [
+        "e28996cd-fbfc-4319-b918-faa7cc8814bd",
+        "3dc90f3b-079e-467c-aa1b-79c1eebed2b0"
+      ]
+    },
+    {
+      "id": "142abcb3-5648-47e0-b07a-0f8c1b49afc0",
+      "revision": 1,
+      "frameId": "8570d364-07c4-4ccf-9652-5e326c2c6c9a",
+      "kind": "poi",
+      "name": "集合点（演示）",
+      "geometry": {
+        "type": "point",
+        "coordinates": [-5, -60]
+      }
+    }
+  ],
+  "nodes": [
+    {
+      "id": "901066b0-919c-4d83-b491-fa2b3e394d9f",
+      "revision": 1,
+      "frameId": "8570d364-07c4-4ccf-9652-5e326c2c6c9a",
+      "name": "南门",
+      "position": [-5, 15],
+      "entranceId": "3e6b2fed-a03a-409b-8c5f-2449874da614"
+    },
+    {
+      "id": "15709d9c-ee90-4371-8b7f-5350519dc752",
+      "revision": 1,
+      "frameId": "8570d364-07c4-4ccf-9652-5e326c2c6c9a",
+      "name": "集合点",
+      "position": [-5, -60]
+    }
+  ],
+  "edges": [
+    {
+      "id": "71a29daa-3d0d-4ba8-bd1a-83d204426895",
+      "revision": 1,
+      "frameId": "8570d364-07c4-4ccf-9652-5e326c2c6c9a",
+      "name": "南侧步道",
+      "from": "15709d9c-ee90-4371-8b7f-5350519dc752",
+      "to": "901066b0-919c-4d83-b491-fa2b3e394d9f",
+      "oneWay": false,
+      "accessible": true,
+      "covered": false,
+      "closed": false,
+      "points": []
+    }
+  ],
+  "tombstones": []
+}
