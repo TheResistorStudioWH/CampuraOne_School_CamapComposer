@@ -149,15 +149,28 @@ export default function App() {
     [mapError, setMapError] = useState(""),
     [connectionAttempt, setConnectionAttempt] = useState(0);
   const appliedMapSettings = useRef(mapSettings);
+  const storedMapSettings = useRef<MapSettings | null>(null);
   const [credentialsReady, setCredentialsReady] = useState(false),
     [credentialBusy, setCredentialBusy] = useState(false),
     [credentialNote, setCredentialNote] = useState("正在读取本机配置…");
   useEffect(() => {
     let disposed = false;
-    loadMapCredentials()
+    let timeout: ReturnType<typeof setTimeout>;
+    Promise.race([
+      loadMapCredentials(),
+      new Promise<null>((_, reject) => {
+        timeout = setTimeout(
+          () => reject(Error("系统凭据库响应超时")),
+          15000,
+        );
+      }),
+    ])
       .then((settings) => {
         if (disposed) return;
-        if (settings) setMapSettings(settings);
+        if (settings) {
+          storedMapSettings.current = settings;
+          setMapSettings(settings);
+        }
         setCredentialNote(
           settings
             ? "已从本机系统凭据库读取配置，可直接连接。"
@@ -167,10 +180,11 @@ export default function App() {
       .catch(() => {
         if (!disposed)
           setCredentialNote(
-            "无法读取本机凭据库。请检查系统权限；已有配置不会自动覆盖。",
+            "无法读取本机凭据库。请检查钥匙串授权窗口或系统权限后重启 App；已有配置不会自动覆盖。",
           );
       })
       .finally(() => {
+        clearTimeout(timeout);
         if (!disposed) setCredentialsReady(true);
       });
     return () => {
@@ -195,6 +209,9 @@ export default function App() {
   const activeFrame = doc.frames.find((f) => f.id === frameId) || doc.frames[0],
     building = doc.features.find((f) => f.id === buildingId),
     levels = building?.levels || [];
+  // Binding is metadata for the existing view. Keep the projection adapter in sync
+  // during render (including undo/redo) before any Konva feature calls project().
+  if (mapOn) map.current?.setBinding(activeFrame?.bindings.amap);
   const selectedFeature =
     selected?.collection === "features"
       ? doc.features.find((f) => f.id === selected.id)
@@ -295,9 +312,6 @@ export default function App() {
     mapOn,
     connectionAttempt,
     activeFrame?.id,
-    activeFrame?.bindings.amap?.longitude,
-    activeFrame?.bindings.amap?.latitude,
-    activeFrame?.bindings.amap?.rotation,
   ]);
   function commit(next: CamapDocument) {
     // Capture before React schedules the updater; latest.current changes below.
@@ -517,7 +531,21 @@ export default function App() {
   }
   async function persistCredentials() {
     validateMapSettings(mapSettings);
-    await saveMapCredentials(mapSettings);
+    const normalized = {
+      key: mapSettings.key.trim(),
+      securityCode: mapSettings.securityCode.trim(),
+      proxy: mapSettings.proxy.trim(),
+    };
+    const stored = storedMapSettings.current;
+    if (
+      !stored ||
+      stored.key !== normalized.key ||
+      stored.securityCode !== normalized.securityCode ||
+      stored.proxy !== normalized.proxy
+    ) {
+      await saveMapCredentials(normalized);
+      storedMapSettings.current = normalized;
+    }
     setCredentialNote("已保存到本机系统凭据库，重启后会自动回填。");
     if (mapCredentialsNeedReload(mapSettings)) {
       reloadForCredentials();
@@ -541,6 +569,7 @@ export default function App() {
     setMapError("");
     try {
       await clearMapCredentials();
+      storedMapSettings.current = null;
       const empty = emptyMapSettings();
       setMapSettings(empty);
       appliedMapSettings.current = empty;
@@ -649,7 +678,6 @@ export default function App() {
       frame.bindings.amap = binding;
       frame.revision++;
       commit(next);
-      setMapLoading(true);
       setTool("select");
       setMessage("校园位置已保存，可以开始画地标了。");
     } catch {
